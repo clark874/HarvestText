@@ -580,13 +580,16 @@ class HarvestText(EntNetworkMixin, EntRetrieveMixin, ParsingMixin, SentimentMixi
                         continue
                 result.append((word, flag))
             return result
-    def seg(self, sent, standard_name=False, stopwords=None, return_sent=False):
+
+    def seg(self, sent, standard_name=False, stopwords=None, return_sent=False, jieba_dict=None):
         if self.language == "en":
             from nltk.tokenize import word_tokenize
             stopwords = set() if stopwords is None else stopwords
             words = [x for x in word_tokenize(sent) if not x in stopwords]
             return " ".join(words) if return_sent else words
         else:
+            if jieba_dict:
+                jieba.load_userdict(jieba_dict)
             self.standard_name = standard_name
             entities_info = self.entity_linking(sent)
             sent2 = self.decoref(sent, entities_info)
@@ -596,9 +599,13 @@ class HarvestText(EntNetworkMixin, EntRetrieveMixin, ParsingMixin, SentimentMixi
                 if word in self.entity_types:
                     if self.standard_name:
                         word = entities_info[i][1][0]  # 使用链接的实体
+                        if stopwords and word in stopwords:
+                            word = ''
                     else:
                         l, r = entities_info[i][0]  # 或使用原文
                         word = sent[l:r]
+                        if stopwords and word in stopwords:
+                            word = ''
                     i += 1
                 else:
                     if stopwords and word in stopwords:
@@ -608,7 +615,11 @@ class HarvestText(EntNetworkMixin, EntRetrieveMixin, ParsingMixin, SentimentMixi
                 return " ".join(result)
             else:
                 return result
-    def save_entity_info(self, save_path='./ht_entities.txt', entity_mention_dict=None, entity_type_dict=None):
+
+    def save_entity_info(self,
+                         save_path='./ht_entities.txt',
+                         entity_mention_dict=None,
+                         entity_type_dict=None):
         '''保存ht已经登录的实体信息，或者外部提供的相同格式的信息，目前保存的信息包括entity,mention,type.
 
         如果不提供两个dict参数，则默认使用模型自身已登录信息，否则使用提供的对应dict
@@ -631,6 +642,7 @@ class HarvestText(EntNetworkMixin, EntRetrieveMixin, ParsingMixin, SentimentMixi
         :param entity_type_dict: dict, {entity:entity_type}格式，
         :return: None
         '''
+        # 两个初始字典都为空，读取系统内已经登陆的字典
         if entity_mention_dict is None and entity_type_dict is None:
             entity_mention_dict = self.entity_mention_dict
             entity_type_dict = self.entity_type_dict
@@ -640,10 +652,14 @@ class HarvestText(EntNetworkMixin, EntRetrieveMixin, ParsingMixin, SentimentMixi
                     (entity0, {entity0}) for entity0 in entity_type_dict)
             else:
                 entity_mention_dict = dict(
-                    (entity0, set(mentions0)) for (entity0, mentions0) in entity_mention_dict.items())
+                    (entity0, set(mentions0))
+                    for (entity0, mentions0) in entity_mention_dict.items())
 
             if entity_type_dict is None:
-                entity_type_dict = {entity: "添加词" for entity in entity_mention_dict}
+                entity_type_dict = {
+                    entity: "添加词"
+                    for entity in entity_mention_dict
+                }
 
         # 两个dict不对齐的情况下，以添加词作为默认词性
         for entity in entity_mention_dict:
@@ -653,40 +669,143 @@ class HarvestText(EntNetworkMixin, EntRetrieveMixin, ParsingMixin, SentimentMixi
         if entity_mention_dict is None or entity_type_dict is None:
             return
 
+        # 建立{类型：{实体：{别称}}}的默认嵌套词典，默认值属性为{实体：{别称}}
+        type_entity_mention_dict = defaultdict(dict)
+        # 抽取{实体：类型}字典中的实体和类型
+        for entity0, type0 in entity_type_dict.items():
+            # 验证实体是否存在于{实体：{别称}}字典中
+            if entity0 in entity_mention_dict:
+                # 在默认嵌套词典中建立{类型：{实体：}}的键值为{别称},type_entity_mention_dict:  defaultdict(<class 'dict'>, {'其他名': {'再次证明': {'再次证明'}, '高度重视': {'高度重视'}}, '国家名': {'中国_国家名': {'中华人民', '中方愿', '中华', '中方', '中国政府', '中国', '中华民族'}}})
+                type_entity_mention_dict[type0][entity0] = entity_mention_dict[
+                    entity0]
+
         out_lines = []
-        for entity, mentions0 in entity_mention_dict.items():
-            etype = entity_type_dict[entity]
-            enames = [entity] + list(mentions0)
-            out_lines.append(" ".join("%s||%s" % (ename, etype) for ename in enames))
+        # 正则表达式筛选出中文字母和数字和下划线
+        reg = re.compile(r'^[a-zA-Z0-9_\u4e00-\u9fa5]+$')
+        index_dict = sorted(type_entity_mention_dict.keys(),
+                            key=lambda i: i.encode('gbk'))
+        index_dict2 = '/'.join(
+            [f'{ii}_{kk}' for ii, kk in enumerate(index_dict)])
+        # out_lines.append(f'{index_dict2}||字典索引')
+        type_entity_mention_dict2 = {}
+        for dict_key in index_dict:
+            type_entity_mention_dict2[dict_key] = type_entity_mention_dict[
+                dict_key]
+        #按照类型排序输出字典，首先读取类型总字典，type_entity_mention_dict:  defaultdict(<class 'dict'>, {'其他名': {'再次证明': {'再次证明'}, '高度重视': {'高度重视'}}, '国家名': {'中国_国家名': {'中华人民', '中方愿', '中华', '中方', '中国政府', '中国', '中华民族'}}})
+        for etype, entity_mention_dict2 in type_entity_mention_dict2.items():
+            out_lines.append(f'{etype}||{etype}')
+            sort_entity_mention_dict2 = sorted(
+                entity_mention_dict2.items(),
+                key=lambda x: (''.join(re.findall(reg, x[0]))).encode('gbk'))
+            # 在{实体：{别称}}字典中读取实体和别称集合或列表，entity_mention_dict:  defaultdict(<class 'set'>, {'再次证明': {'再次证明'}, '高度重视': {'高度重视'}, '中国_国家名': {'中华人民', '中方愿', '中华', '中方', '中国政府', '中国', '中华民族'}})
+            for i in sort_entity_mention_dict2:
+                entity, mentions0 = i
+                # 在{实体：类型}字典中提取实体的类型，entity_type_dict:  {'再次证明': '其他名', '高度重视': '其他名', '中国_国家名': '国家名'}
+                # etype = entity_type_dict[entity]
+                entity_list = []
+                entity_list.append(entity)
+                entity_list.extend(list(mentions0))
+                out_lines.append(" ".join("%s||%s" % (ename, etype)
+                                          for ename in entity_list))
+                # out_lines.append(" ".join("%s||%s" % (ename, etype) for ename in enames))
+        out_lines.insert(0, f'{index_dict2}||字典索引')
 
         dir0 = os.path.dirname(save_path)
-        if dir0 != "":        # 如果在当前路径，则makedirs会报错
+        if dir0 != "":  # 如果在当前路径，则makedirs会报错
             os.makedirs(dir0, exist_ok=True)
         with open(save_path, "w", encoding='utf-8') as f:
             f.write("\n".join(out_lines))
+        print(f'ht字典保存完毕{save_path}')
 
-    def load_entities(self, load_path='./ht_entities.txt', override=True):
-        """从save_entities保存的文件读取实体信息
-
+    def load_entities(self, load_path='./ht_entities.txt', override=True, filter_len=False,filter_type=[], check=False):
+        """
+        从save_entities保存的文件读取实体信息
         :param load_path: str, 读取路径（默认：./ht_entities.txt）
         :param override: bool, 是否重写已登录实体，默认True
+        :param filter_len: bool,是否过滤一个字的实体，默认False
+        :param filter_type: list,过滤字典中特定类别的词，默认空列表[]，注意这时不能直接存储字典，会导致这部分词汇丢失
+        :param check: bool,是否检查实体，读取错误时使用，默认False
         :return: None, 实体已登录到ht中
         """
         # should have been inited at __init__(), but can override
+        entity_sum = []
+        mention_sum = set()
         if override:
             self.clear()
         with open(load_path, encoding='utf-8') as f:
-            for line in f:
-                enames = line.strip().split()
-                entity, etype = enames[0].split("||")
-                mentions = set(x.split("||")[0] for x in enames[1:])
-                self.entity_type_dict[entity] = etype
-                self.entity_mention_dict[entity] = mentions
+            #跳过第一行
+            lines = f.readlines()[1:]
+            print(f'读取字典包含词条数：{len(lines)}')
+            # line:  中国_国家名||国家名 中华民族||国家名 中华||国家名 中方愿||国家名 中国||国家名 中国政府||国家名 中方||国家名 中华人民
+            if len(filter_type)>0:
+                print(colored(f'filter_type=True,过滤实体类型{str(filter_type)}','red'))
+                print(colored("".center(50, "-"), "green"))
+                print()
+            for line in lines:
+                if len(line)>0:
+                    # ['中国_国家名||国家名', '中华民族||国家名', '中华||国家名', '中方愿||国家名', '中国||国家名', '中国政府||国家名', '中方||国家名', '中华人民']
+                    enames = line.strip().split()
+                    # entity, etype:  中国_国家名 国家名
+                    entity, etype = enames[0].split("||")
+                    if check:
+                        print(f'{entity},{etype}')
+                    # 纠正第一个词错误的命名
+                    if entity.find('_') != -1:
+                        entity = entity[:entity.index('_')]
+                    if filter_len:
+                        if len(entity) <= 1:
+                            print(colored(f'filter_len=True,过滤一个字和以下的实体{entity}, {etype}','red'))
+                            print(colored("".center(50, "-"), "blue"))
+                            print()
+                            continue
+                    if len(filter_type)>0:
+                        if etype in filter_type:
+                            continue
+                    # mentions: {'中华人民', '中方愿', '中华', '中方', '中国政府', '中国', '中华民族'}，enames[1:]切出来所有其他mention，split分割mention和type，然后用set提取mentions
+                    mentions = set(x.split("||")[0] for x in enames[1:])
+                    # 如果第一个词没有在提及集合里，则加入提及集合
+                    if not len(mentions):
+                        mentions.add(entity)
+                        print(f'{entity}无别称，自身作为别称')
+                    if entity not in mentions:
+                        mentions.add(entity)
+                        print(f'{entity}无别称，自身作为别称')
+                    if entity not in entity_sum:
+                        key = 1
+                        if len(mention_ := mention_sum & mentions) >0:
+                            for i_ in mention_:
+                                for k,v in self.entity_mention_dict.items():
+                                    if i_ in v:
+                                        print(f'{entity}的别称{mentions}中的{i_}已经登录为{k}的别称，跳过该别称的登录')
+                                        mentions.remove(i_)
+                                        if i_ == entity:
+                                            key = 0
+                                            print(f'删除实体{entity}')
+                        if key == 1:
+                            entity_sum.append(entity)
+                            mention_sum.update(mentions)
+                            # 在{实体：类型}字典中存储实体：类型的键值对，self.entity_type_dict:  {'再次证明': '其他名', '高度重视': '其他名', '中国_国家名': '国家名'}
+                            self.entity_type_dict[entity] = etype
+                            # 在{实体：{别称}}字典中存储实体：别称的键值对，self.entity_mention_dict:  defaultdict(<class 'set'>, {'再次证明': {'再次证明'}, '高度重视': {'高度重视'}, '中国_国家名': {'中华人民', '中方愿', '中华', '中方', '中国政府', '中国', '中华民族'}})
+                            self.entity_mention_dict[entity] = mentions
+                    else:
+                        print(
+                            f'{entity}实体登录重复,之前登录类型：{self.entity_type_dict[entity]}，之前登录别称：{self.entity_mention_dict[entity]}'
+                        )
+                        continue
+                else:
+                    print(f'{lines[lines.index(line)-1]}后有空行。')
 
+
+        # 建立{类型：{实体：{别称}}}的默认嵌套词典，默认值属性为{实体：{别称}}
         type_entity_mention_dict = defaultdict(dict)
+        # 抽取{实体：类型}字典中的实体和类型
         for entity0, type0 in self.entity_type_dict.items():
+            # 验证实体是否存在于{实体：{别称}}字典中
             if entity0 in self.entity_mention_dict:
-                type_entity_mention_dict[type0][entity0] = self.entity_mention_dict[entity0]
+                # 在默认嵌套词典中建立{类型：{实体：}}的键值为{别称},type_entity_mention_dict:  defaultdict(<class 'dict'>, {'其他名': {'再次证明': {'再次证明'}, '高度重视': {'高度重视'}}, '国家名': {'中国_国家名': {'中华人民', '中方愿', '中华', '中方', '中国政府', '中国', '中华民族'}}})
+                type_entity_mention_dict[type0][
+                    entity0] = self.entity_mention_dict[entity0]
         self.type_entity_mention_dict = type_entity_mention_dict
         self._add_entities(type_entity_mention_dict)
 
@@ -830,4 +949,109 @@ class HarvestText(EntNetworkMixin, EntRetrieveMixin, ParsingMixin, SentimentMixi
     def clear(self):
         self.deprepare()
         self.__init__()
+
+    def add_new_entity2(self, entity0, mention0=None, type0=None):
+        k0 = 0
+        ty=[]
+        if mention0 is None:
+            mention0 = entity0
+        for i,element in enumerate(self.entity_mention_dict.values()):
+            if entity0 in element:
+                k0 = 1
+                k_key = list(self.entity_mention_dict.keys())[i]
+            else:
+                continue
+        if k0 != 0:
+            print('字典已收录该实体:%s，别称:%s'%(k_key,self.entity_mention_dict[k_key]))
+            print('='*20)
+        else:
+            print('提醒！发现新实体:%s,别称:%s'% (entity0,mention0))
+            k2=0
+            if len(input('是否收录？回车收录，其他按键不收录')) != 0:
+                print('='*20)
+                return
+            if len(input('是否修改？回车不修改，其他按键修改')) != 0:
+                while True:
+                    entity0 = str(input('修改为什么词？直接输入:'))
+                    for i,element in enumerate(self.entity_mention_dict.values()):
+                        if entity0 in element:
+                            k2=1
+                            k_key2 = list(self.entity_mention_dict.keys())[i]
+                        else:
+                            continue
+                    if k2 != 0:
+                        k2=0
+                        if len(input('字典已收录该实体:%s，别称:%s,是否继续收录？回车继续，其他按键退出:'%(k_key2,self.entity_mention_dict[k_key2]))) != 0:
+                            print('='*20)
+                            return
+                        else:
+                            continue
+                    else:
+                        mention0=entity0
+                        if len(input('是否收录为其他实体别称？回车不收录，其他按键收录:')) != 0:
+                            k3_0 = 0
+                            k3 = str(input('%s是什么实体的别称？'% entity0))
+                            for i,element in enumerate(self.entity_mention_dict.values()):
+                                if k3 in element:
+                                    k3_0=1
+                                    k_key3 = list(self.entity_mention_dict.keys())[i]
+                                else:
+                                    continue
+                            if k3_0 != 0:
+                                k3_0 =0
+                                self.entity_mention_dict[k_key3].add(entity0)
+                                k4 = self.entity_mention_dict[k_key3]
+                                print('实体:%s加入别称:%s，现在别称:%s'% (k_key3,entity0,k4))
+                                print('='*20)
+                                return
+                            else:
+                                print('没有输入的实体，直接收录')
+                        else:
+                            print('字典收录新实体:%s,加入别称:%s'% (entity0,mention0))
+                            break
+            else:
+                if len(input('是否收录为其他实体别称？回车不收录，其他按键收录:')) != 0:
+                    k3_0 = 0
+                    k3 = str(input('%s是什么实体的别称？'% entity0))
+                    for i,element in enumerate(self.entity_mention_dict.values()):
+                        if k3 in element:
+                            k3_0=1
+                            k_key3 = list(self.entity_mention_dict.keys())[i]
+                        else:
+                            continue
+                    if k3_0 != 0:
+                        k3_0 =0
+                        self.entity_mention_dict[k_key3].add(entity0)
+                        k4 = self.entity_mention_dict[k_key3]
+                        print('实体:%s加入别称:%s，现在别称:%s'% (k_key3,entity0,k4))
+                        print('='*20)
+                        return
+                    else:
+                        print('没有输入的实体，直接收录')
+                else:
+                    print('字典收录新实体:%s,加入别称:%s'% (entity0,mention0))
+            self.entity_mention_dict[entity0] = set([mention0])
+            print('既有类型:')
+            for i,element in enumerate(set(self.entity_type_dict.values())):
+                print(i,element,'|',end=" ")
+                ty.append(element)
+            k = input('输入类型：')
+            if len(k)!= 0:
+                if k.isdigit():
+                    type0 = ty[int(k)]
+                else:
+                    type0 = str(k)
+                print('实体:%s，类型:%s，别称:%s'%(entity0,type0,self.entity_mention_dict[entity0]))
+                print('='*20)
+            else:
+                type0 = '未分类'
+                print('实体:%s，类型:%s，别称:%s'%(entity0,type0,self.entity_mention_dict[entity0]))
+                print('='*20)
+            self.entity_type_dict[entity0] = type0
+            self.build_trie(mention0, entity0, type0)
+            if entity0 not in self.type_entity_mention_dict[type0]:
+                self.type_entity_mention_dict[type0][entity0] = set([mention0])
+            else:
+                self.type_entity_mention_dict[type0][entity0].add(mention0)
+        self.check_prepared()
 
