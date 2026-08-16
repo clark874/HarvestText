@@ -154,9 +154,11 @@ class EntNetworkMixin:
                     # print(colored("==>> words: ", "green"), words)
                 else:
                     if flag_add:
+                        # 修复: 此分支 seg 返回字符串导致 flag 未绑定(NameError)。
+                        # flag_add 需要 (词, 词性) 元组 → 必须用 posseg
                         words = list(
                             f'{x}_{flag}'
-                            for x in self.seg(doc, standard_name=standard_name)
+                            for x, flag in self.posseg(doc, standard_name=standard_name)
                             if x not in stopwords if len(x) >= len_filter)
                     else:
                         words = list(

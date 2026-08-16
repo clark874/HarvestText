@@ -682,8 +682,13 @@ class HarvestText(EntNetworkMixin, EntRetrieveMixin, ParsingMixin, SentimentMixi
         out_lines = []
         # 正则表达式筛选出中文字母和数字和下划线
         reg = re.compile(r'^[a-zA-Z0-9_\u4e00-\u9fa5]+$')
-        index_dict = sorted(type_entity_mention_dict.keys(),
-                            key=lambda i: i.encode('gbk'))
+        def _sort_key(s):
+            # GBK 排序保持中文习惯；遇到非 GBK 字符（英文/符号）回退 UTF-8，避免崩溃
+            try:
+                return (0, s.encode('gbk'))
+            except UnicodeEncodeError:
+                return (1, s.encode('utf-8'))
+        index_dict = sorted(type_entity_mention_dict.keys(), key=_sort_key)
         index_dict2 = '/'.join(
             [f'{ii}_{kk}' for ii, kk in enumerate(index_dict)])
         # out_lines.append(f'{index_dict2}||字典索引')
@@ -696,15 +701,16 @@ class HarvestText(EntNetworkMixin, EntRetrieveMixin, ParsingMixin, SentimentMixi
             out_lines.append(f'{etype}||{etype}')
             sort_entity_mention_dict2 = sorted(
                 entity_mention_dict2.items(),
-                key=lambda x: (''.join(re.findall(reg, x[0]))).encode('gbk'))
+                key=lambda x: _sort_key(''.join(re.findall(reg, x[0]))))
             # 在{实体：{别称}}字典中读取实体和别称集合或列表，entity_mention_dict:  defaultdict(<class 'set'>, {'再次证明': {'再次证明'}, '高度重视': {'高度重视'}, '中国_国家名': {'中华人民', '中方愿', '中华', '中方', '中国政府', '中国', '中华民族'}})
             for i in sort_entity_mention_dict2:
                 entity, mentions0 = i
                 # 在{实体：类型}字典中提取实体的类型，entity_type_dict:  {'再次证明': '其他名', '高度重视': '其他名', '中国_国家名': '国家名'}
                 # etype = entity_type_dict[entity]
-                entity_list = []
-                entity_list.append(entity)
-                entity_list.extend(list(mentions0))
+                entity_list = [entity]
+                # 排序保证确定性（set 迭代序不稳定会导致同内容不同哈希）；
+                # 剔除与实体相同的别称，消除 v1 格式的自重复冗余（load 会自动补回）
+                entity_list.extend(sorted(m for m in mentions0 if m != entity))
                 out_lines.append(" ".join("%s||%s" % (ename, etype)
                                           for ename in entity_list))
                 # out_lines.append(" ".join("%s||%s" % (ename, etype) for ename in enames))
@@ -747,6 +753,10 @@ class HarvestText(EntNetworkMixin, EntRetrieveMixin, ParsingMixin, SentimentMixi
                     enames = line.strip().split()
                     # entity, etype:  中国_国家名 国家名
                     entity, etype = enames[0].split("||")
+                    if entity == etype:
+                        # 类型标题行（save_entity_info 写入的“类型||类型”行），
+                        # 不是实体：跳过以修复 save→load 往返把类型名登录为实体的污染
+                        continue
                     if check:
                         print(f'{entity},{etype}')
                     # 纠正第一个词错误的命名
